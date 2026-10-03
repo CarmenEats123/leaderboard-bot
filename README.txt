@@ -1,25 +1,36 @@
-DETECTIVE YAMAHA — LOW-API FINAL BUILD
+DETECTIVE YAMAHA v4 — IMPORTANT
 
-Key fixes:
-- Roblox staff membership is cached and refreshed only once per hour.
-- Presence is checked every 5 minutes.
-- Presence batches are only 35 IDs per request.
-- Strong 429 Retry-After / exponential backoff handling.
-- A failed scan does NOT crash/stop the bot.
-- One single live Discord message is edited every scan.
-- Each exact DPI server lists tracked staff highest-rank first.
-- Attempts to show the total public server player count.
-- Server Designer role is pinged only when a Matrona+ transitions into DPI.
-- First baseline does not ping people who were already in-game.
-- Channel ID: 1544431033787613204
+This is the corrected build.
 
-Commands:
-/serverscan
-/yamaha
+If your console says:
+"Initial Detective Yamaha scan failed"
+or
+"Detective Yamaha: current-server channel not found."
 
-Required env:
-DISCORD_TOKEN
-GUILD_ID
+YOU ARE STILL RUNNING THE OLD bot.py.
 
-Start:
-python bot.py
+This v4 console says:
+"Detective Yamaha v4 online as ..."
+
+Expected channel:
+#server-list
+
+Matrona+ alert channel ID:
+1544431033787613204
+
+Features:
+- one single live #server-list message
+- updates every 5 minutes
+- ranks sorted highest -> lowest
+- groups staff by exact DPI server
+- attempts to show total server population
+- Server Designer ping when Matrona+ newly joins
+- staff membership cache refreshed hourly
+- 25-ID presence batches
+- long 429 backoff
+- failed Roblox scan never kills the bot
+- /serverscan always returns a useful response
+- /yamaha status command
+
+Start file:
+bot.py
