@@ -1,40 +1,25 @@
-DETECTIVE YAMAHA — DPI SERVER WATCH
+DETECTIVE YAMAHA — LOW-API FINAL BUILD
 
-WHAT THIS VERSION DOES
-- Checks Divine Sister staff every 5 minutes.
-- Tracks rank 50+ users.
-- Checks their PUBLIC Roblox presence.
-- Detects who is inside De Pride Isle Sanatorium.
-- Groups visible staff by exact server gameId.
-- Updates #current-server automatically.
-- Detects transitions from NOT in DPI -> IN DPI.
-- If the person is Matrona rank or higher, sends an alert in
-  #leadership-presence and pings the Discord role "Server Designer".
-- Matrona rank is discovered dynamically from group 5008654.
-- Presence requests are batched in groups of 50 to avoid Roblox API 400 errors.
+Key fixes:
+- Roblox staff membership is cached and refreshed only once per hour.
+- Presence is checked every 5 minutes.
+- Presence batches are only 35 IDs per request.
+- Strong 429 Retry-After / exponential backoff handling.
+- A failed scan does NOT crash/stop the bot.
+- One single live Discord message is edited every scan.
+- Each exact DPI server lists tracked staff highest-rank first.
+- Attempts to show the total public server player count.
+- Server Designer role is pinged only when a Matrona+ transitions into DPI.
+- First baseline does not ping people who were already in-game.
+- Channel ID: 1544431033787613204
 
-IMPORTANT PRIVACY LIMIT
-If Roblox does not publicly expose a user's game presence, the bot cannot
-reliably detect that user or their server and does not attempt to bypass it.
+Commands:
+/serverscan
+/yamaha
 
-EXPECTED DISCORD NAMES
-Channel: leadership-presence
-Channel: current-server
-Role: Server Designer
-
-ENVIRONMENT VARIABLES
-Required:
+Required env:
 DISCORD_TOKEN
 GUILD_ID
 
-Optional IDs if you prefer IDs instead of name lookup:
-ALERT_CHANNEL_ID
-CURRENT_SERVER_CHANNEL_ID
-SERVER_DESIGNER_ROLE_ID
-
-START COMMAND
+Start:
 python bot.py
-
-SLASH COMMANDS
-/serverscan
-/yamaha
