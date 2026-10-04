@@ -49,7 +49,7 @@ SERVER_DESIGNER_ROLE_NAME = "Server Designer"
 
 STAFF_CACHE_FILE = Path("yamaha_staff_cache.json")
 PRESENCE_STATE_FILE = Path("yamaha_presence_state.json")
-THREAD_STATE_FILE = Path("yamaha_thread_state.json")
+MESSAGE_STATE_FILE = Path("yamaha_live_message_state.json")
 RATE_LIMIT_STATE_FILE = Path("yamaha_rate_limit_state.json")
 
 GROUPS_API = "https://groups.roblox.com"
@@ -497,21 +497,24 @@ async def get_server_counts(session, server_ids):
 
 
 # =========================================================
-# SINGLE THREAD MESSAGE
+# SINGLE LIVE EMBED MESSAGE
 # =========================================================
 
-def build_thread_content(servers, counts):
+def build_live_embed(servers, counts):
     total = sum(
         len(members)
         for members in servers.values()
     )
 
-    lines = [
-        "## 🛰️ Detective Yamaha — DPI Staff Server Scan",
-        f"Tracked staff currently visible in DPI: **{total}**",
-        "Sorted **highest rank → lowest rank** • ⭐ = Matrona+",
-        "",
-    ]
+    embed = discord.Embed(
+        title="🛰️ Detective Yamaha — DPI Staff Server Scan",
+        description=(
+            f"Tracked staff currently visible in DPI: **{total}**\n"
+            "Sorted **highest rank → lowest rank** • ⭐ = Matrona+"
+        ),
+        colour=discord.Colour.blurple(),
+        timestamp=utc_now(),
+    )
 
     exact = [
         (sid, members)
@@ -539,119 +542,125 @@ def build_thread_content(servers, counts):
         else:
             population = f"{playing}/{maximum} players"
 
-        lines.extend([
-            (
-                f"### Server {index} — **{population}** "
-                f"• **{len(members)} tracked staff**"
-            ),
-            f"`{sid}`",
-        ])
+        lines = [f"`{sid}`"]
 
         for person in members:
             star = " ⭐" if person["is_matrona_plus"] else ""
-
             lines.append(
-                f"• **{person['username']}**{star} "
-                f"— {person['role_name']}"
+                f"• **{person['username']}**{star} — {person['role_name']}"
             )
 
-        lines.append("")
+        value = "\n".join(lines)
+
+        if len(value) > 1024:
+            value = value[:980].rsplit("\n", 1)[0] + "\n…"
+
+        embed.add_field(
+            name=(
+                f"Server {index} — {population} • "
+                f"{len(members)} tracked staff"
+            ),
+            value=value,
+            inline=False,
+        )
 
     if "server-hidden" in servers:
-        lines.append("### In DPI — exact server hidden")
+        lines = []
 
         for person in servers["server-hidden"]:
             star = " ⭐" if person["is_matrona_plus"] else ""
-
             lines.append(
-                f"• **{person['username']}**{star} "
-                f"— {person['role_name']}"
+                f"• **{person['username']}**{star} — {person['role_name']}"
             )
 
-        lines.append("")
+        value = "\n".join(lines) or "No visible staff."
 
-    if not servers:
-        lines.extend([
-            "No rank-50+ staff are currently "
-            "**publicly visible** inside DPI.",
-            "",
-        ])
+        if len(value) > 1024:
+            value = value[:980].rsplit("\n", 1)[0] + "\n…"
 
-    lines.extend([
-        (
-            f"_Updated <t:{int(utc_now().timestamp())}:R> • "
-            "automatic refresh every 5 minutes_"
-        ),
-        "_Public Roblox presence only._",
-    ])
-
-    content = "\n".join(lines)
-
-    if len(content) > 1990:
-        content = (
-            content[:1870].rsplit("\n", 1)[0]
-            + "\n\n_⚠️ Additional entries omitted because Discord "
-              "limits a single message to 2000 characters._"
+        embed.add_field(
+            name="In DPI — exact server hidden",
+            value=value,
+            inline=False,
         )
 
-    return content
+    if not servers:
+        embed.add_field(
+            name="No visible staff",
+            value=(
+                "No rank-50+ staff are currently **publicly visible** "
+                "inside DPI."
+            ),
+            inline=False,
+        )
+
+    embed.set_footer(
+        text=(
+            "Automatic refresh every 5 minutes • "
+            "public Roblox presence only"
+        )
+    )
+
+    return embed
 
 
-async def get_or_create_scan_thread():
+async def upsert_live_embed(servers, counts):
     channel = await resolve_text_channel(
         SERVER_LIST_CHANNEL_ID
     )
 
-    state = load_json(THREAD_STATE_FILE, {})
-    thread_id = state.get("thread_id")
-    starter_message_id = state.get("starter_message_id")
-
-    thread = None
-
-    if thread_id:
-        thread = bot.get_channel(int(thread_id))
-
-        if thread is None:
-            try:
-                fetched = await bot.fetch_channel(int(thread_id))
-                if isinstance(fetched, discord.Thread):
-                    thread = fetched
-            except Exception:
-                thread = None
-
-    if thread is not None:
-        return thread
-
-    starter = await channel.send(
-        "🛰️ **Detective Yamaha live DPI server tracker**"
-    )
-
-    thread = await starter.create_thread(
-        name="DPI Live Staff Servers",
-        auto_archive_duration=1440,
-    )
-
-    save_json(
-        THREAD_STATE_FILE,
-        {
-            "thread_id": str(thread.id),
-            "starter_message_id": str(starter.id),
-            "created_at": utc_iso(),
-        },
-    )
-
-    return thread
-
-
-async def post_scan_message(servers, counts):
-    thread = await get_or_create_scan_thread()
-
-    content = build_thread_content(
+    embed = build_live_embed(
         servers,
         counts,
     )
 
-    await thread.send(content)
+    state = load_json(
+        MESSAGE_STATE_FILE,
+        {},
+    )
+
+    message_id = state.get("message_id")
+    message = None
+
+    if message_id:
+        try:
+            message = await channel.fetch_message(
+                int(message_id)
+            )
+        except Exception:
+            message = None
+
+    if message is None:
+        try:
+            async for old in channel.history(limit=50):
+                if (
+                    old.author.id == bot.user.id
+                    and old.embeds
+                    and old.embeds[0].title
+                    == "🛰️ Detective Yamaha — DPI Staff Server Scan"
+                ):
+                    message = old
+                    break
+        except Exception:
+            pass
+
+    if message is None:
+        message = await channel.send(
+            embed=embed
+        )
+    else:
+        await message.edit(
+            content=None,
+            embed=embed,
+        )
+
+    save_json(
+        MESSAGE_STATE_FILE,
+        {
+            "message_id": str(message.id),
+            "updated_at": utc_iso(),
+        },
+    )
 
 
 async def send_matrona_alert(joined):
@@ -787,8 +796,8 @@ async def run_scan():
             },
         )
 
-        # Every successful scan posts ONE message into ONE thread.
-        await post_scan_message(
+        # Every successful scan updates ONE neat embed in #server-list.
+        await upsert_live_embed(
             servers,
             counts,
         )
@@ -813,7 +822,7 @@ async def run_scan():
         }
 
         print(
-            "Detective Yamaha v6 scan OK:",
+            "Detective Yamaha v7 scan OK:",
             result,
         )
 
@@ -832,7 +841,7 @@ async def presence_worker():
             last_error = repr(exc)
 
             print(
-                "Detective Yamaha v6 scan failed; "
+                "Detective Yamaha v7 scan failed; "
                 "bot remains online:",
                 repr(exc),
             )
@@ -891,7 +900,7 @@ async def serverscan(
                 f"Detected server groups: **{result['servers']}**\n"
                 f"New Matrona+ joins: "
                 f"**{result['matrona_plus_joins']}**\n"
-                "A fresh message was posted in the live thread."
+                "The live server-list embed was refreshed."
             ),
             ephemeral=True,
         )
@@ -941,12 +950,12 @@ async def yamaha(
     )
 
     text = (
-        "🕵️ **Detective Yamaha v6 — DPI Server Watch**\n"
+        "🕵️ **Detective Yamaha v7 — DPI Server Watch**\n"
         "• Scan: every **5 minutes**\n"
         "• Staff cache refresh: every **60 minutes**\n"
         f"• Cached staff: **{len(cache.get('staff', {}))}**\n"
         f"• Server-list channel: <#{SERVER_LIST_CHANNEL_ID}>\n"
-        "• Output: **one thread, one new scan message per successful scan**\n"
+        "• Output: **one live embed message, edited every successful scan**\n"
         "• Alert: **Matrona+ → Server Designer ping**\n"
         f"• Last success: **{last_scan or 'Not yet'}**"
     )
@@ -975,7 +984,7 @@ async def on_ready():
     global started_once, presence_task, staff_task
 
     print(
-        f"Detective Yamaha v6 THREAD MODE online as {bot.user}"
+        f"Detective Yamaha v7 EMBED MODE online as {bot.user}"
     )
     print(
         f"Guild {GUILD_ID} | channel {SERVER_LIST_CHANNEL_ID}"

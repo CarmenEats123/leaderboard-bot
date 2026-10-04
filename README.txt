@@ -1,29 +1,22 @@
-DETECTIVE YAMAHA v6 — THREAD MODE
+DETECTIVE YAMAHA v7 — EMBED MODE
 
-IMPORTANT:
-Your screenshot/log still showed OLD CODE:
-"Detective Yamaha online as ..."
-"current-server channel not found"
-
-This v6 must print:
-"Detective Yamaha v6 THREAD MODE online as ..."
+This is the non-thread version.
 
 Behavior:
-- Posts immediately after startup (after ~3 seconds), if Roblox allows the scan.
-- Scans every 5 minutes.
-- Each successful scan posts ONE message in ONE persistent Discord thread.
-- The message lists visible DPI staff grouped by exact server, sorted by rank.
-- Shows total tracked staff per server and tries to show total server population.
-- Matrona+ join triggers Server Designer ping in the alert channel.
-- Manual /serverscan really runs the same scan and posts a new thread message.
-- Manual scan has 45-second cooldown to avoid accidental rate-limit spam.
-- 429 errors are handled gracefully and do not kill the bot.
-- Full staff membership refresh only happens hourly.
+- Uses ONE normal Discord message in #server-list.
+- The message is a neat Discord EMBED (the boxed card).
+- It is created after the first successful startup scan.
+- Every 5 minutes, the SAME embed message is edited/refreshed.
+- /serverscan manually refreshes the same embed.
+- Staff are grouped by exact DPI server and sorted highest rank -> lowest.
+- Shows tracked staff per server and attempts to show total server population.
+- Matrona+ users are marked with a star.
+- When a Matrona+ newly joins DPI, Server Designer is pinged in the alert channel.
+- Roblox 429s are retried/backed off and do not kill the bot.
+- Staff membership cache refreshes hourly.
 
-Discord IDs:
-Guild: 1544430688470700133
-Channel: 1544431033787613204
+Expected startup line:
+Detective Yamaha v7 EMBED MODE online as ...
 
-VERY IMPORTANT FOR BOT-HOSTING + GITHUB:
-If "Pull automatically at every restart" is enabled, update bot.py IN GITHUB.
-Otherwise the host will overwrite your new local bot.py with the old GitHub one.
+If your host still prints THREAD MODE or plain Detective Yamaha online,
+it is still running an older bot.py.
