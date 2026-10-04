@@ -7,24 +7,31 @@ from pathlib import Path
 
 import aiohttp
 import discord
-from discord.ext import commands, tasks
+from discord.ext import commands
 from dotenv import load_dotenv
 
 load_dotenv()
 
 # =========================================================
-# DETECTIVE YAMAHA — DPI SERVER WATCH v4
+# DETECTIVE YAMAHA v5 — BOT-HOSTING FRIENDLY
 # =========================================================
 
 TOKEN = os.getenv("DISCORD_TOKEN", "").strip()
-GUILD_ID = int(os.getenv("GUILD_ID", "1544430688470700133") or 1544430688470700133)
 
-# Matrona+ alert channel already supplied by you.
-ALERT_CHANNEL_ID = int(os.getenv("ALERT_CHANNEL_ID", "1544431033787613204") or 1544431033787613204)
+GUILD_ID = int(
+    os.getenv("GUILD_ID", "1544430688470700133")
+    or 1544430688470700133
+)
 
-# If you know #server-list's ID, set CURRENT_SERVER_CHANNEL_ID in Env.
-# Otherwise the bot finds a text channel named "server-list".
-CURRENT_SERVER_CHANNEL_ID = int(os.getenv("CURRENT_SERVER_CHANNEL_ID", "1544431033787613204") or 1544431033787613204)
+SERVER_LIST_CHANNEL_ID = int(
+    os.getenv("CURRENT_SERVER_CHANNEL_ID", "1544431033787613204")
+    or 1544431033787613204
+)
+
+ALERT_CHANNEL_ID = int(
+    os.getenv("ALERT_CHANNEL_ID", "1544431033787613204")
+    or 1544431033787613204
+)
 
 SERVER_DESIGNER_ROLE_ID = int(
     os.getenv("SERVER_DESIGNER_ROLE_ID", "0") or 0
@@ -35,10 +42,12 @@ DPI_PLACE_ID = 3522803956
 DPI_UNIVERSE_ID = 1246853548
 
 STAFF_MIN_RANK = 50
-PRESENCE_SCAN_MINUTES = 5
-STAFF_REFRESH_MINUTES = 60
 
-SERVER_LIST_CHANNEL_NAME = "server-list"
+PRESENCE_SCAN_SECONDS = 300          # 5 min
+STAFF_REFRESH_SECONDS = 3600         # 1 hour
+PRESENCE_BATCH_SIZE = 50             # fewer requests than 25
+PRESENCE_BATCH_PAUSE = 2.0           # spread requests out
+
 SERVER_DESIGNER_ROLE_NAME = "Server Designer"
 
 STAFF_CACHE_FILE = Path("yamaha_staff_cache.json")
@@ -55,13 +64,16 @@ bot = commands.Bot(command_prefix="!", intents=intents)
 scan_lock = asyncio.Lock()
 staff_lock = asyncio.Lock()
 
+presence_task = None
+staff_task = None
+
 last_scan = None
 last_error = None
 last_staff_refresh = None
 
 
 # =========================================================
-# UTILITIES
+# HELPERS
 # =========================================================
 
 def utc_now():
@@ -94,42 +106,23 @@ def profile_url(user_id):
     return f"https://www.roblox.com/users/{user_id}/profile"
 
 
-async def resolve_text_channel(guild, channel_id, fallback_name=None):
-    channel = guild.get_channel(channel_id) if channel_id else None
+async def resolve_text_channel(channel_id):
+    channel = bot.get_channel(channel_id)
 
-    if channel is None and channel_id:
-        channel = bot.get_channel(channel_id)
-
-    if channel is None and channel_id:
+    if channel is None:
         try:
             channel = await bot.fetch_channel(channel_id)
         except Exception as exc:
-            print(f"Could not fetch Discord channel {channel_id}: {exc!r}")
-            channel = None
+            raise RuntimeError(
+                f"Cannot access Discord channel {channel_id}: {exc!r}"
+            )
 
-    if isinstance(channel, discord.TextChannel):
-        return channel
+    if not isinstance(channel, discord.TextChannel):
+        raise RuntimeError(
+            f"Discord channel {channel_id} is not a text channel."
+        )
 
-    if fallback_name:
-        wanted = fallback_name.lower()
-        for candidate in guild.text_channels:
-            if candidate.name.lower() == wanted:
-                return candidate
-
-    return None
-
-
-def find_server_designer_role(guild):
-    if SERVER_DESIGNER_ROLE_ID:
-        role = guild.get_role(SERVER_DESIGNER_ROLE_ID)
-        if role:
-            return role
-
-    for role in guild.roles:
-        if role.name.lower() == SERVER_DESIGNER_ROLE_NAME.lower():
-            return role
-
-    return None
+    return channel
 
 
 async def request_json(
@@ -139,59 +132,55 @@ async def request_json(
     *,
     params=None,
     payload=None,
-    retries=8,
+    retries=6,
 ):
-    delay = 8.0
+    delay = 10.0
 
     for attempt in range(retries):
-        try:
-            async with session.request(
-                method,
-                url,
-                params=params,
-                json=payload,
-            ) as response:
-                body = await response.text()
+        async with session.request(
+            method,
+            url,
+            params=params,
+            json=payload,
+        ) as response:
+            body = await response.text()
 
-                if response.status == 200:
-                    return json.loads(body)
+            if response.status == 200:
+                return json.loads(body)
 
-                if response.status == 429 and attempt < retries - 1:
-                    retry_after = response.headers.get("Retry-After")
-                    try:
-                        wait = float(retry_after)
-                    except Exception:
-                        wait = delay
+            if response.status == 429:
+                retry_after = response.headers.get("Retry-After")
 
-                    wait = max(wait, delay) + random.uniform(0.5, 1.5)
+                try:
+                    wait = float(retry_after)
+                except Exception:
+                    wait = delay
+
+                wait = max(wait, delay) + random.uniform(0.5, 1.5)
+
+                if attempt < retries - 1:
                     print(
-                        f"Roblox 429 — cooling down {wait:.1f}s "
-                        f"({attempt + 1}/{retries})"
+                        f"Roblox 429 — waiting {wait:.1f}s "
+                        f"before retry {attempt + 2}/{retries}"
                     )
                     await asyncio.sleep(wait)
                     delay = min(delay * 1.8, 90)
                     continue
 
-                if 500 <= response.status <= 599 and attempt < retries - 1:
-                    await asyncio.sleep(delay)
-                    delay = min(delay * 1.8, 90)
-                    continue
+            if 500 <= response.status <= 599 and attempt < retries - 1:
+                await asyncio.sleep(delay)
+                delay = min(delay * 1.8, 90)
+                continue
 
-                raise RuntimeError(
-                    f"Roblox API {response.status}: {body[:500]}"
-                )
+            raise RuntimeError(
+                f"Roblox API {response.status}: {body[:500]}"
+            )
 
-        except aiohttp.ClientError as exc:
-            if attempt >= retries - 1:
-                raise RuntimeError(f"Network error: {exc!r}")
-            await asyncio.sleep(delay)
-            delay = min(delay * 1.8, 90)
-
-    raise RuntimeError("Roblox request failed after retries.")
+    raise RuntimeError("Roblox API retries exhausted.")
 
 
 # =========================================================
-# STAFF CACHE — EXPENSIVE, SO ONLY HOURLY
+# STAFF CACHE — ONLY ONCE PER HOUR
 # =========================================================
 
 async def get_group_roles(session):
@@ -208,7 +197,11 @@ async def get_users_in_role(session, role_id):
     cursor = None
 
     while True:
-        params = {"limit": 100, "sortOrder": "Asc"}
+        params = {
+            "limit": 100,
+            "sortOrder": "Asc",
+        }
+
         if cursor:
             params["cursor"] = cursor
 
@@ -221,6 +214,7 @@ async def get_users_in_role(session, role_id):
 
         for item in data.get("data", []):
             uid = item.get("userId") or item.get("id")
+
             if uid is None:
                 continue
 
@@ -234,6 +228,7 @@ async def get_users_in_role(session, role_id):
             }
 
         cursor = data.get("nextPageCursor")
+
         if not cursor:
             break
 
@@ -246,10 +241,13 @@ async def refresh_staff_cache():
     global last_staff_refresh
 
     async with staff_lock:
+        print("Refreshing staff cache...")
+
         headers = {
             "User-Agent":
-            "Detective-Yamaha-DPI-Watch/4.0"
+            "Detective-Yamaha-DPI-Watch/5.0"
         }
+
         timeout = aiohttp.ClientTimeout(total=600)
 
         async with aiohttp.ClientSession(
@@ -260,24 +258,27 @@ async def refresh_staff_cache():
             roles = await get_group_roles(session)
 
             matrona_roles = [
-                r for r in roles
-                if "matrona" in str(r.get("name", "")).lower()
+                role
+                for role in roles
+                if "matrona" in str(role.get("name", "")).lower()
             ]
 
             if not matrona_roles:
                 raise RuntimeError("Matrona role not found.")
 
             matrona_rank = min(
-                int(r.get("rank", 0) or 0)
-                for r in matrona_roles
+                int(role.get("rank", 0) or 0)
+                for role in matrona_roles
             )
 
             staff_roles = sorted(
                 [
-                    r for r in roles
-                    if int(r.get("rank", 0) or 0) >= STAFF_MIN_RANK
+                    role
+                    for role in roles
+                    if int(role.get("rank", 0) or 0) >= STAFF_MIN_RANK
                 ],
-                key=lambda r: int(r.get("rank", 0) or 0),
+                key=lambda role:
+                    int(role.get("rank", 0) or 0),
             )
 
             staff = {}
@@ -288,10 +289,14 @@ async def refresh_staff_cache():
                 role_rank = int(role.get("rank", 0) or 0)
 
                 print(
-                    f"Staff cache {index}/{len(staff_roles)}: {role_name}"
+                    f"Staff role {index}/{len(staff_roles)}: "
+                    f"{role_name}"
                 )
 
-                users = await get_users_in_role(session, role_id)
+                users = await get_users_in_role(
+                    session,
+                    role_id,
+                )
 
                 for uid, info in users.items():
                     staff[uid] = {
@@ -303,7 +308,6 @@ async def refresh_staff_cache():
                             role_rank >= matrona_rank,
                     }
 
-                # Intentionally gentle on Roblox.
                 await asyncio.sleep(2.0)
 
         snapshot = {
@@ -313,39 +317,43 @@ async def refresh_staff_cache():
         }
 
         save_json(STAFF_CACHE_FILE, snapshot)
+
         last_staff_refresh = snapshot["updated_at"]
 
         print(
-            f"Staff cache ready: {len(staff)} staff."
+            f"Staff cache complete: {len(staff)} staff."
         )
+
         return snapshot
 
 
 async def ensure_staff_cache():
     cached = load_json(STAFF_CACHE_FILE, {})
+
     if cached.get("staff"):
         return cached
+
     return await refresh_staff_cache()
 
 
-@tasks.loop(minutes=STAFF_REFRESH_MINUTES)
-async def staff_refresh_loop():
-    try:
-        await refresh_staff_cache()
-    except Exception as exc:
-        print(
-            "Hourly staff refresh failed; old cache kept:",
-            repr(exc),
-        )
+async def staff_refresh_worker():
+    # CRITICAL: do not hit Roblox again immediately on startup.
+    await asyncio.sleep(STAFF_REFRESH_SECONDS)
 
+    while not bot.is_closed():
+        try:
+            await refresh_staff_cache()
+        except Exception as exc:
+            print(
+                "Staff refresh failed; retaining old cache:",
+                repr(exc),
+            )
 
-@staff_refresh_loop.before_loop
-async def before_staff_refresh_loop():
-    await bot.wait_until_ready()
+        await asyncio.sleep(STAFF_REFRESH_SECONDS)
 
 
 # =========================================================
-# PRESENCE — EVERY 5 MINUTES
+# PRESENCE — EVERY 5 MINUTES, NO DUPLICATE STARTUP SCAN
 # =========================================================
 
 async def get_user_presences(session, user_ids):
@@ -356,9 +364,6 @@ async def get_user_presences(session, user_ids):
     results = {}
 
     async def fetch_batch(batch):
-        if not batch:
-            return
-
         try:
             data = await request_json(
                 session,
@@ -366,29 +371,37 @@ async def get_user_presences(session, user_ids):
                 f"{PRESENCE_API}/v1/presence/users",
                 payload={"userIds": batch},
             )
+
         except RuntimeError as exc:
+            # Future-proof against Roblox lowering the accepted batch size.
             if (
                 "too many user ids" in str(exc).lower()
                 and len(batch) > 1
             ):
                 middle = len(batch) // 2
                 await fetch_batch(batch[:middle])
-                await asyncio.sleep(1.0)
+                await asyncio.sleep(PRESENCE_BATCH_PAUSE)
                 await fetch_batch(batch[middle:])
                 return
+
             raise
 
         for item in data.get("userPresences", []):
             uid = item.get("userId")
+
             if uid is not None:
                 results[str(uid)] = item
 
-    # 25 IDs/batch: more conservative on shared-host IPs.
-    for offset in range(0, len(ids), 25):
-        await fetch_batch(ids[offset:offset + 25])
+    batches = [
+        ids[i:i + PRESENCE_BATCH_SIZE]
+        for i in range(0, len(ids), PRESENCE_BATCH_SIZE)
+    ]
 
-        if offset + 25 < len(ids):
-            await asyncio.sleep(1.25)
+    for index, batch in enumerate(batches, start=1):
+        await fetch_batch(batch)
+
+        if index < len(batches):
+            await asyncio.sleep(PRESENCE_BATCH_PAUSE)
 
     return results
 
@@ -428,9 +441,9 @@ def build_servers(snapshot, presences):
 
     for members in servers.values():
         members.sort(
-            key=lambda p: (
-                -p["role_rank"],
-                p["username"].lower(),
+            key=lambda person: (
+                -person["role_rank"],
+                person["username"].lower(),
             )
         )
 
@@ -439,9 +452,9 @@ def build_servers(snapshot, presences):
 
 async def get_server_counts(session, server_ids):
     wanted = {
-        str(sid)
-        for sid in server_ids
-        if sid and sid != "server-hidden"
+        str(server_id)
+        for server_id in server_ids
+        if server_id != "server-hidden"
     }
 
     if not wanted:
@@ -450,12 +463,12 @@ async def get_server_counts(session, server_ids):
     found = {}
     cursor = None
 
-    # Cap pagination so one scan cannot run wild.
-    for _ in range(8):
+    for _ in range(6):
         params = {
             "sortOrder": "Asc",
             "limit": 100,
         }
+
         if cursor:
             params["cursor"] = cursor
 
@@ -479,6 +492,7 @@ async def get_server_counts(session, server_ids):
             break
 
         cursor = data.get("nextPageCursor")
+
         if not cursor:
             break
 
@@ -488,25 +502,19 @@ async def get_server_counts(session, server_ids):
 
 
 # =========================================================
-# ONE LIVE MESSAGE IN #server-list
+# ONE SINGLE LIVE MESSAGE
 # =========================================================
 
 def build_live_content(servers, counts):
-    total_staff = sum(
+    total = sum(
         len(members)
         for members in servers.values()
     )
 
     lines = [
         "## 🛰️ Detective Yamaha — DPI Server List",
-        (
-            f"Tracked staff visible in DPI: "
-            f"**{total_staff}**"
-        ),
-        (
-            "Sorted **highest rank → lowest rank** • "
-            "⭐ = Matrona+"
-        ),
+        f"Tracked staff visible in DPI: **{total}**",
+        "Sorted **highest rank → lowest rank** • ⭐ = Matrona+",
         "",
     ]
 
@@ -518,16 +526,17 @@ def build_live_content(servers, counts):
 
     exact.sort(
         key=lambda item: (
-            -max(x["role_rank"] for x in item[1]),
+            -max(person["role_rank"] for person in item[1]),
             -len(item[1]),
             item[0],
         )
     )
 
     for index, (sid, members) in enumerate(exact, start=1):
-        c = counts.get(str(sid), {})
-        playing = c.get("playing")
-        maximum = c.get("max_players")
+        server_info = counts.get(sid, {})
+
+        playing = server_info.get("playing")
+        maximum = server_info.get("max_players")
 
         if playing is None:
             population = "player count unavailable"
@@ -539,26 +548,32 @@ def build_live_content(servers, counts):
         lines.extend([
             (
                 f"### Server {index} — **{population}** "
-                f"• **{len(members)} staff**"
+                f"• **{len(members)} tracked staff**"
             ),
             f"`{sid}`",
         ])
 
-        for p in members:
-            star = " ⭐" if p["is_matrona_plus"] else ""
+        for person in members:
+            star = " ⭐" if person["is_matrona_plus"] else ""
+
             lines.append(
-                f"• **{p['username']}**{star} — {p['role_name']}"
+                f"• **{person['username']}**{star} "
+                f"— {person['role_name']}"
             )
 
         lines.append("")
 
     if "server-hidden" in servers:
-        lines.append("### In DPI — exact server hidden")
+        lines.append(
+            "### In DPI — exact server hidden"
+        )
 
-        for p in servers["server-hidden"]:
-            star = " ⭐" if p["is_matrona_plus"] else ""
+        for person in servers["server-hidden"]:
+            star = " ⭐" if person["is_matrona_plus"] else ""
+
             lines.append(
-                f"• **{p['username']}**{star} — {p['role_name']}"
+                f"• **{person['username']}**{star} "
+                f"— {person['role_name']}"
             )
 
         lines.append("")
@@ -573,46 +588,42 @@ def build_live_content(servers, counts):
     lines.extend([
         (
             f"_Updated <t:{int(utc_now().timestamp())}:R> • "
-            "automatic scan every 5 minutes_"
+            "refreshes every 5 minutes_"
         ),
-        (
-            "_Roblox public presence only; hidden presence "
-            "cannot be detected._"
-        ),
+        "_Public Roblox presence only._",
     ])
 
     content = "\n".join(lines)
 
-    # User specifically requested ONE message.
     if len(content) > 1990:
-        cut = content[:1900].rsplit("\n", 1)[0]
         content = (
-            cut
-            + "\n\n_⚠️ More staff were detected, but Discord's "
-              "single-message character limit was reached._"
+            content[:1880].rsplit("\n", 1)[0]
+            + "\n\n_⚠️ Additional entries omitted because Discord "
+              "limits a single message to 2000 characters._"
         )
 
     return content
 
 
-async def upsert_server_list_message(guild, servers, counts):
-    channel = await resolve_text_channel(guild, CURRENT_SERVER_CHANNEL_ID, SERVER_LIST_CHANNEL_NAME)
+async def upsert_live_message(servers, counts):
+    channel = await resolve_text_channel(
+        SERVER_LIST_CHANNEL_ID
+    )
 
-    if not channel:
-        raise RuntimeError(
-            f"Could not access Discord channel ID {CURRENT_SERVER_CHANNEL_ID}. "
-            f"Check bot permissions in guild {GUILD_ID}."
-        )
+    content = build_live_content(
+        servers,
+        counts,
+    )
 
-    content = build_live_content(servers, counts)
-
-    saved = load_json(MESSAGE_STATE_FILE, {})
-    message_id = saved.get(str(guild.id))
+    state = load_json(MESSAGE_STATE_FILE, {})
+    message_id = state.get(str(GUILD_ID))
     message = None
 
     if message_id:
         try:
-            message = await channel.fetch_message(int(message_id))
+            message = await channel.fetch_message(
+                int(message_id)
+            )
         except Exception:
             message = None
 
@@ -635,26 +646,43 @@ async def upsert_server_list_message(guild, servers, counts):
     else:
         await message.edit(content=content)
 
-    saved[str(guild.id)] = str(message.id)
-    save_json(MESSAGE_STATE_FILE, saved)
+    state[str(GUILD_ID)] = str(message.id)
+    save_json(MESSAGE_STATE_FILE, state)
 
 
 # =========================================================
 # MATRONa+ ALERT
 # =========================================================
 
-async def send_matrona_alert(guild, joined):
+async def send_matrona_alert(joined):
     if not joined:
         return
 
-    channel = await resolve_text_channel(guild, ALERT_CHANNEL_ID)
-    if not channel:
-        print(
-            f"Alert channel {ALERT_CHANNEL_ID} not found."
-        )
-        return
+    channel = await resolve_text_channel(
+        ALERT_CHANNEL_ID
+    )
 
-    role = find_server_designer_role(guild)
+    guild = bot.get_guild(GUILD_ID)
+
+    if guild is None:
+        raise RuntimeError(
+            f"Bot is not connected to guild {GUILD_ID}."
+        )
+
+    role = None
+
+    if SERVER_DESIGNER_ROLE_ID:
+        role = guild.get_role(
+            SERVER_DESIGNER_ROLE_ID
+        )
+
+    if role is None:
+        role = discord.utils.find(
+            lambda item:
+                item.name.lower()
+                == SERVER_DESIGNER_ROLE_NAME.lower(),
+            guild.roles,
+        )
 
     mention = (
         role.mention
@@ -666,17 +694,18 @@ async def send_matrona_alert(guild, joined):
         f"{mention} 🚨 **Matrona+ joined DPI**"
     ]
 
-    for p in joined:
+    for person in joined:
         server_label = (
-            f"`{p['game_id']}`"
-            if p.get("game_id")
+            f"`{person['game_id']}`"
+            if person.get("game_id")
             else "server hidden"
         )
 
         lines.append(
-            f"• **{p['username']}** — **{p['role_name']}** "
-            f"• {server_label} • "
-            f"[profile]({profile_url(p['user_id'])})"
+            f"• **{person['username']}** — "
+            f"**{person['role_name']}** • "
+            f"{server_label} • "
+            f"[profile]({profile_url(person['user_id'])})"
         )
 
     await channel.send(
@@ -701,9 +730,10 @@ async def run_scan():
 
         headers = {
             "User-Agent":
-            "Detective-Yamaha-DPI-Watch/4.0"
+            "Detective-Yamaha-DPI-Watch/5.0"
         }
-        timeout = aiohttp.ClientTimeout(total=300)
+
+        timeout = aiohttp.ClientTimeout(total=360)
 
         async with aiohttp.ClientSession(
             headers=headers,
@@ -729,34 +759,40 @@ async def run_scan():
                 ],
             )
 
-        previous = load_json(PRESENCE_STATE_FILE, {})
+        previous = load_json(
+            PRESENCE_STATE_FILE,
+            {},
+        )
+
         previous_ids = set(
             previous.get("in_dpi", {}).keys()
         )
 
         current = {}
-        joined = []
+        joined_matrona_plus = []
 
         for server_id, members in servers.items():
-            for p in members:
-                uid = p["user_id"]
+            for person in members:
+                uid = person["user_id"]
 
                 current[uid] = {
                     "server_id": server_id,
-                    "username": p["username"],
-                    "role_name": p["role_name"],
+                    "username": person["username"],
+                    "role_name": person["role_name"],
                     "is_matrona_plus":
-                        p["is_matrona_plus"],
+                        person["is_matrona_plus"],
                 }
 
-                # No startup spam: only alert after a baseline exists.
                 if (
                     previous
                     and uid not in previous_ids
-                    and p["is_matrona_plus"]
+                    and person["is_matrona_plus"]
                 ):
-                    joined.append(p)
+                    joined_matrona_plus.append(
+                        person
+                    )
 
+        # Save before Discord output so alerts cannot repeat.
         save_json(
             PRESENCE_STATE_FILE,
             {
@@ -765,18 +801,15 @@ async def run_scan():
             },
         )
 
-        for guild in bot.guilds:
-            await upsert_server_list_message(
-                guild,
-                servers,
-                counts,
-            )
+        await upsert_live_message(
+            servers,
+            counts,
+        )
 
-            if joined:
-                await send_matrona_alert(
-                    guild,
-                    joined,
-                )
+        if joined_matrona_plus:
+            await send_matrona_alert(
+                joined_matrona_plus
+            )
 
         last_scan = utc_iso()
         last_error = None
@@ -785,34 +818,37 @@ async def run_scan():
             "staff_checked":
                 len(snapshot.get("staff", {})),
             "visible":
-                sum(len(v) for v in servers.values()),
-            "server_groups":
+                sum(len(x) for x in servers.values()),
+            "servers":
                 len(servers),
-            "new_matrona_plus":
-                len(joined),
+            "matrona_plus_joins":
+                len(joined_matrona_plus),
         }
 
-        print("Yamaha scan OK:", result)
+        print(
+            "Detective Yamaha v5 scan OK:",
+            result,
+        )
+
         return result
 
 
-@tasks.loop(minutes=PRESENCE_SCAN_MINUTES)
-async def presence_loop():
-    try:
-        await run_scan()
-    except Exception as exc:
-        global last_error
-        last_error = repr(exc)
+async def presence_worker():
+    # Exactly one startup scan, not two/three simultaneous scans.
+    while not bot.is_closed():
+        try:
+            await run_scan()
+        except Exception as exc:
+            global last_error
+            last_error = repr(exc)
 
-        print(
-            "Yamaha scan failed; bot stays alive and retries next cycle:",
-            repr(exc),
-        )
+            print(
+                "Detective Yamaha v5 scan failed; "
+                "bot remains online and will retry in 5 minutes:",
+                repr(exc),
+            )
 
-
-@presence_loop.before_loop
-async def before_presence_loop():
-    await bot.wait_until_ready()
+        await asyncio.sleep(PRESENCE_SCAN_SECONDS)
 
 
 # =========================================================
@@ -821,9 +857,11 @@ async def before_presence_loop():
 
 @bot.tree.command(
     name="serverscan",
-    description="Refresh Detective Yamaha's DPI server list now.",
+    description="Refresh the DPI server list now.",
 )
-async def serverscan(interaction: discord.Interaction):
+async def serverscan(
+    interaction: discord.Interaction,
+):
     await interaction.response.defer(
         ephemeral=True,
         thinking=True,
@@ -836,9 +874,10 @@ async def serverscan(interaction: discord.Interaction):
             (
                 "✅ **Server scan completed.**\n"
                 f"Staff checked: **{result['staff_checked']}**\n"
-                f"Staff visible in DPI: **{result['visible']}**\n"
-                f"Server groups: **{result['server_groups']}**\n"
-                f"New Matrona+ joins: **{result['new_matrona_plus']}**"
+                f"Visible staff: **{result['visible']}**\n"
+                f"Server groups: **{result['servers']}**\n"
+                f"New Matrona+ joins: "
+                f"**{result['matrona_plus_joins']}**"
             ),
             ephemeral=True,
         )
@@ -847,7 +886,7 @@ async def serverscan(interaction: discord.Interaction):
         await interaction.followup.send(
             (
                 "⚠️ **The bot is online, but Roblox rejected this scan.** "
-                "The 5-minute watcher remains active and will retry.\n"
+                "The automatic watcher will retry in 5 minutes.\n"
                 f"`{type(exc).__name__}: {str(exc)[:350]}`"
             ),
             ephemeral=True,
@@ -858,21 +897,30 @@ async def serverscan(interaction: discord.Interaction):
     name="yamaha",
     description="Show Detective Yamaha status.",
 )
-async def yamaha(interaction: discord.Interaction):
-    cache = load_json(STAFF_CACHE_FILE, {})
+async def yamaha(
+    interaction: discord.Interaction,
+):
+    cache = load_json(
+        STAFF_CACHE_FILE,
+        {},
+    )
 
     text = (
-        "🕵️ **Detective Yamaha — DPI Server Watch v4**\n"
-        f"• Server scan: every **{PRESENCE_SCAN_MINUTES} minutes**\n"
-        f"• Staff cache: every **{STAFF_REFRESH_MINUTES} minutes**\n"
+        "🕵️ **Detective Yamaha v5 — DPI Server Watch**\n"
+        "• Presence scan: every **5 minutes**\n"
+        "• Staff cache: every **60 minutes**\n"
         f"• Cached staff: **{len(cache.get('staff', {}))}**\n"
-        f"• Server-list channel: **#{SERVER_LIST_CHANNEL_NAME}**\n"
-        f"• Alert: **Matrona+ → Server Designer ping**\n"
+        f"• Guild: `{GUILD_ID}`\n"
+        f"• Server-list channel: <#{SERVER_LIST_CHANNEL_ID}>\n"
+        "• Alert: **Matrona+ → Server Designer ping**\n"
         f"• Last success: **{last_scan or 'Not yet'}**"
     )
 
     if last_error:
-        text += f"\n• Last error: `{last_error[:450]}`"
+        text += (
+            f"\n• Last error: "
+            f"`{last_error[:450]}`"
+        )
 
     await interaction.response.send_message(
         text,
@@ -884,58 +932,51 @@ async def yamaha(interaction: discord.Interaction):
 # READY
 # =========================================================
 
-startup_task_started = False
+started_once = False
 
 
 @bot.event
 async def on_ready():
-    global startup_task_started
+    global started_once, presence_task, staff_task
 
-    print(f"Detective Yamaha v4.1 EXACT-ID online as {bot.user}")
-    print(f"Guild ID: {GUILD_ID} | Channel ID: {CURRENT_SERVER_CHANNEL_ID}")
+    print(
+        f"Detective Yamaha v5 BOT-HOSTING FIX online as {bot.user}"
+    )
+    print(
+        f"Guild ID {GUILD_ID} | "
+        f"Server-list channel {SERVER_LIST_CHANNEL_ID}"
+    )
 
     try:
-        if GUILD_ID:
-            guild_obj = discord.Object(id=GUILD_ID)
-            bot.tree.clear_commands(guild=guild_obj)
-            await bot.tree.sync(guild=guild_obj)
-
         synced = await bot.tree.sync()
-        print(f"Synced {len(synced)} global slash commands.")
-
-    except Exception as exc:
-        print("Slash sync error:", repr(exc))
-
-    if not presence_loop.is_running():
-        presence_loop.start()
-
-    if not staff_refresh_loop.is_running():
-        staff_refresh_loop.start()
-
-    # Only schedule this once even if Discord reconnects.
-    if not startup_task_started:
-        startup_task_started = True
-        asyncio.create_task(startup_scan())
-
-
-async def startup_scan():
-    # Give Discord and the host a moment to settle.
-    await asyncio.sleep(10)
-
-    try:
-        await run_scan()
-    except Exception as exc:
-        global last_error
-        last_error = repr(exc)
-
         print(
-            "Startup scan was rate-limited/failed. "
-            "Bot is still running and will retry automatically:",
+            f"Synced {len(synced)} global slash commands."
+        )
+    except Exception as exc:
+        print(
+            "Slash command sync error:",
             repr(exc),
         )
 
+    if started_once:
+        return
+
+    started_once = True
+
+    # ONE presence worker. No duplicate startup scanner.
+    presence_task = asyncio.create_task(
+        presence_worker()
+    )
+
+    # Staff refresh waits one full hour before touching Roblox again.
+    staff_task = asyncio.create_task(
+        staff_refresh_worker()
+    )
+
 
 if not TOKEN:
-    raise RuntimeError("DISCORD_TOKEN is missing.")
+    raise RuntimeError(
+        "DISCORD_TOKEN is missing."
+    )
 
 bot.run(TOKEN)
