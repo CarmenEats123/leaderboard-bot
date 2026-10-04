@@ -17,19 +17,14 @@ load_dotenv()
 # =========================================================
 
 TOKEN = os.getenv("DISCORD_TOKEN", "").strip()
-GUILD_ID = int(os.getenv("GUILD_ID", "0") or 0)
+GUILD_ID = int(os.getenv("GUILD_ID", "1544430688470700133") or 1544430688470700133)
 
 # Matrona+ alert channel already supplied by you.
-ALERT_CHANNEL_ID = int(
-    os.getenv("ALERT_CHANNEL_ID", "1544431033787613204")
-    or 1544431033787613204
-)
+ALERT_CHANNEL_ID = int(os.getenv("ALERT_CHANNEL_ID", "1544431033787613204") or 1544431033787613204)
 
 # If you know #server-list's ID, set CURRENT_SERVER_CHANNEL_ID in Env.
 # Otherwise the bot finds a text channel named "server-list".
-CURRENT_SERVER_CHANNEL_ID = int(
-    os.getenv("CURRENT_SERVER_CHANNEL_ID", "0") or 0
-)
+CURRENT_SERVER_CHANNEL_ID = int(os.getenv("CURRENT_SERVER_CHANNEL_ID", "1544431033787613204") or 1544431033787613204)
 
 SERVER_DESIGNER_ROLE_ID = int(
     os.getenv("SERVER_DESIGNER_ROLE_ID", "0") or 0
@@ -99,23 +94,28 @@ def profile_url(user_id):
     return f"https://www.roblox.com/users/{user_id}/profile"
 
 
-def find_server_list_channel(guild):
-    if CURRENT_SERVER_CHANNEL_ID:
-        channel = guild.get_channel(CURRENT_SERVER_CHANNEL_ID)
-        if isinstance(channel, discord.TextChannel):
-            return channel
+async def resolve_text_channel(guild, channel_id, fallback_name=None):
+    channel = guild.get_channel(channel_id) if channel_id else None
 
-    for channel in guild.text_channels:
-        if channel.name.lower() == SERVER_LIST_CHANNEL_NAME:
-            return channel
+    if channel is None and channel_id:
+        channel = bot.get_channel(channel_id)
 
-    return None
+    if channel is None and channel_id:
+        try:
+            channel = await bot.fetch_channel(channel_id)
+        except Exception as exc:
+            print(f"Could not fetch Discord channel {channel_id}: {exc!r}")
+            channel = None
 
-
-def find_alert_channel(guild):
-    channel = guild.get_channel(ALERT_CHANNEL_ID)
     if isinstance(channel, discord.TextChannel):
         return channel
+
+    if fallback_name:
+        wanted = fallback_name.lower()
+        for candidate in guild.text_channels:
+            if candidate.name.lower() == wanted:
+                return candidate
+
     return None
 
 
@@ -596,12 +596,12 @@ def build_live_content(servers, counts):
 
 
 async def upsert_server_list_message(guild, servers, counts):
-    channel = find_server_list_channel(guild)
+    channel = await resolve_text_channel(guild, CURRENT_SERVER_CHANNEL_ID, SERVER_LIST_CHANNEL_NAME)
 
     if not channel:
         raise RuntimeError(
-            'Could not find the Discord channel "server-list". '
-            "Set CURRENT_SERVER_CHANNEL_ID in Env if its name differs."
+            f"Could not access Discord channel ID {CURRENT_SERVER_CHANNEL_ID}. "
+            f"Check bot permissions in guild {GUILD_ID}."
         )
 
     content = build_live_content(servers, counts)
@@ -647,7 +647,7 @@ async def send_matrona_alert(guild, joined):
     if not joined:
         return
 
-    channel = find_alert_channel(guild)
+    channel = await resolve_text_channel(guild, ALERT_CHANNEL_ID)
     if not channel:
         print(
             f"Alert channel {ALERT_CHANNEL_ID} not found."
@@ -891,7 +891,8 @@ startup_task_started = False
 async def on_ready():
     global startup_task_started
 
-    print(f"Detective Yamaha v4 online as {bot.user}")
+    print(f"Detective Yamaha v4.1 EXACT-ID online as {bot.user}")
+    print(f"Guild ID: {GUILD_ID} | Channel ID: {CURRENT_SERVER_CHANNEL_ID}")
 
     try:
         if GUILD_ID:
