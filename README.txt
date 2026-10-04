@@ -1,30 +1,29 @@
-DETECTIVE YAMAHA v5 — BOT-HOSTING FIX
+DETECTIVE YAMAHA v6 — THREAD MODE
 
 IMPORTANT:
-If Bot-Hosting is connected to GitHub with "Pull automatically at every restart"
-enabled, changing bot.py only in the Files tab will be overwritten at restart.
-UPDATE THE GITHUB REPOSITORY'S bot.py with this v5 file, OR disable automatic
-GitHub pulling / use Archive source.
+Your screenshot/log still showed OLD CODE:
+"Detective Yamaha online as ..."
+"current-server channel not found"
 
-Correct startup line:
-Detective Yamaha v5 BOT-HOSTING FIX online as ...
+This v6 must print:
+"Detective Yamaha v6 THREAD MODE online as ..."
 
-This build fixes:
-- duplicate startup scans
-- hourly staff refresh starting immediately at the same time as presence scan
-- old current-server channel lookup
-- exact guild/channel IDs
-- excessive 25-ID batches (uses 50, fewer total API requests)
-- 429 retry/backoff
-- failed scans do not kill the bot
-- exactly one live server-list message
-- Matrona+ Server Designer alerts
+Behavior:
+- Posts immediately after startup (after ~3 seconds), if Roblox allows the scan.
+- Scans every 5 minutes.
+- Each successful scan posts ONE message in ONE persistent Discord thread.
+- The message lists visible DPI staff grouped by exact server, sorted by rank.
+- Shows total tracked staff per server and tries to show total server population.
+- Matrona+ join triggers Server Designer ping in the alert channel.
+- Manual /serverscan really runs the same scan and posts a new thread message.
+- Manual scan has 45-second cooldown to avoid accidental rate-limit spam.
+- 429 errors are handled gracefully and do not kill the bot.
+- Full staff membership refresh only happens hourly.
 
-Guild:
-1544430688470700133
+Discord IDs:
+Guild: 1544430688470700133
+Channel: 1544431033787613204
 
-Server list + alert channel:
-1544431033787613204
-
-Start file:
-bot.py
+VERY IMPORTANT FOR BOT-HOSTING + GITHUB:
+If "Pull automatically at every restart" is enabled, update bot.py IN GITHUB.
+Otherwise the host will overwrite your new local bot.py with the old GitHub one.
